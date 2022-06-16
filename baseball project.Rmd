@@ -1,0 +1,556 @@
+---
+title: "Baseball Project"
+
+output:
+  html_document:
+    self_contained: true
+    highlight: textmate  # specifies the syntax highlighting style
+    toc: true # should a table of contents (TOC) be shown in the document?
+    toc_depth: 2 # the number of levels (e.g. section, subsection, subsubsection) shown in the TOC
+    number_sections: false # should the sections be numbered?
+
+---
+# Description
+In this project, we will be using several datasets about baseball from the package 'Lahman'.  You can access the list of datasets and all of the variables contained in each one by examining this package in the Packages tab in RStudio.
+Most of the code in this project is in tidyverse syntax.
+
+
+# Preamble
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  comment = "",
+  results = "hold",
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+```
+
+```{r}
+library("car")
+```
+
+
+```{r, message = FALSE, warning = FALSE}
+
+library("tidyverse")
+library("magrittr")
+library("here")
+library("janitor")
+library("lubridate")
+library("gridExtra")
+library("readxl")
+library("glmnet")
+library("Lahman")
+library("viridis")
+library("lindia")
+library("lme4")
+library("caret")
+library("pROC")
+# install.packages("dbplyr", type="binary")
+# install.packages("hardhat", type="binary")
+```
+
+# 1. Datasets
+
+The first step is to create a new dataset called 'Peopledata' that contains all of the variables in the 'People' dataset by
+
+    i. removing all birth information except birthYear and birthCountry and all death information, along with the variable finalGame;
+    
+  
+    ii. replacing birthCountry is by bornUSA, a logical variable indicating if the player was born in the USA;
+    
+```{r}
+People %>% 
+  select(!c("birthMonth", "birthDay", "birthState", "birthCity", "deathYear", "deathMonth", "deathDay", "deathCountry", "deathState", "deathCity", "deathDate", "finalGame", "birthDate")) %>% 
+  rename(bornUSA = birthCountry) %>% 
+  mutate(bornUSA = bornUSA == "USA") -> Peopledata
+```
+    
+
+
+Next we will create new datasets called Battingdata and Fieldingdata by 
+
+    i. choosing data from the years 1985 and 2015,
+    
+    ii. selecting only those variables that for those years have fewer than 25 missing cases, 
+    
+    iii. removing the variable 'G' from the batting dataset and removing the variables "teamID" and "lgID" from both datasets, 
+    
+    iv. creating a variable in 'Battingdata' called batav which is equal to the number of hits (H) over the number of at bats (AB) if the number of hits >0, and =0 if H=0.
+    
+```{r}
+Batting %>% 
+  filter(yearID %in% c(1985, 2015)) -> Batting_year_filtered
+
+Batting_year_filtered %>% 
+sapply(function(x) sum(is.na(x))) < 25 -> na_checker
+
+tibble(na_checker) %>% 
+  mutate(variables = names(na_checker)) %>% 
+  filter(na_checker == TRUE) %>% 
+  pull(variables) -> variables
+
+Batting_year_filtered %>% 
+  select(variables) %>% 
+  select(!c("G", "teamID", "lgID")) -> Battingdata
+
+Battingdata %>% 
+  mutate(
+    batav = case_when(
+      H > 0 ~ H/AB,
+      H == 0 ~ 0
+    )
+  ) -> Battingdata
+
+Fielding %>% 
+  filter(yearID %in% c(1985, 2015)) -> Fielding_year_filtered
+Fielding_year_filtered %>% 
+sapply(function(x) sum(is.na(x))) < 25 -> na_checker2
+
+tibble(na_checker2) %>% 
+  mutate(variables = names(na_checker2)) %>% 
+  filter(na_checker2 == TRUE) %>% 
+  pull(variables) -> variables2
+
+Fielding_year_filtered %>% 
+  select(variables2) %>% 
+  select(!c("teamID", "lgID")) -> Fieldingdata
+  
+  
+
+
+
+  
+```
+    
+    
+
+Next we will create a dataset 'Playerdata' from the dataset 'Salaries' by 
+    
+    i. selecting data from the years 1985 and 2015, 
+    
+    ii. adding all distinct variables from the Fieldingdata, Battingdata and Peopledata datasets,
+    
+    iii. creating a new variable 'allstar' indicating if the player appears anywhere in the AllstarFull dataset,
+    
+    iv. creating a new variable 'age' equal to each player's age in the relevant year,
+    
+    iv. dropping incomplete cases from the dataset,
+    
+    v. dropping unused levels of any categorical variable.
+    
+```{r}
+Salaries %>% 
+  filter(yearID %in% c(1985, 2015)) %>% 
+  full_join(Fieldingdata) %>% 
+  full_join(Battingdata) %>% 
+  full_join(Peopledata) %>% 
+  mutate(allstar = playerID %in% AllstarFull$playerID) %>% 
+  mutate(age = yearID - birthYear) %>% 
+  drop_na() %>% 
+  droplevels() -> Playerdata
+  
+
+
+```
+    
+I then created a dataset called 'TeamSalaries' in which there is a row for each team and each year and the variables are:
+    
+    i. 'Rostercost' = the sum of all player salaries for the given team in the given year
+    
+    ii. 'meansalary' = the mean salary for that team that year
+    
+    iii. 'rostersize' = the number of players listed that year for that team.
+    
+```{r}
+Salaries %>% 
+  group_by(teamID, yearID) %>% 
+  summarise(
+  Rostercost = sum(salary),
+  meansalary = mean(salary),
+  rostersize = n_distinct(playerID)
+  ) -> TeamSalaries
+  
+```
+    
+
+Finally, in this section I created a dataset 'Teamdata' by taking the data from the Teams dataset for the years 1984 to 2016, inclusive and adding to that data the variables in TeamSalaries. Drop any incomplete cases from the dataset.
+
+```{r}
+Teams %>% 
+  filter(yearID %in% 1984:2016) %>% 
+  full_join(TeamSalaries) %>% 
+  drop_na() -> Teamdata
+```
+
+
+
+# 2. Simple Linear Regression
+
+Here, we will first create one plot of mean team salaries over time from 1984 to 2016, and another of the log base 10 of team mean salaries over time from 1984 to 2016.  
+
+```{r}
+Teamdata %>% 
+  ggplot(mapping = aes(x = yearID, y = meansalary)) +
+  geom_point() +
+  labs(
+    title = "Mean Team Salaries From 1984 to 2016",
+    x = "Year",
+    y = "Mean Salary"
+  ) +
+  theme_classic()
+
+Teamdata %>% 
+  ggplot(mapping = aes(x = yearID, y = log10(meansalary))) +
+  geom_point() +
+  labs(
+    title = "Mean Team Salaries From 1984 to 2016",
+    x = "Year",
+    y = "Log base 10 Mean Salary"
+  ) +
+  theme_classic()
+
+
+```
+
+- Upon visual inspection of the two plots, it is evident that the log base 10 plot has a more distinct linear trend as compared to the raw mean salaries plot. The log base 10 plot indicates that as the year increases, the log base 10 mean salaries increase as well. The raw mean salaries plot also shows a slight upward trend as well, but the spread of mean salaries for each year is very large, and thus linearity is harder to see. A linear model is therefore more suitable for the log base 10 mean salaries plot.
+
+- A linear model is also appropriate for the log base 10 plot because the log transformations help make skewed data more normal.
+
+
+Next, we will fit a model of $log_{10}$(meansalary) as a function of yearID. 
+
+```{r}
+linmod<-lm(log10(meansalary)~yearID,data=Teamdata)
+linmod
+summary(linmod)
+
+```
+
+- The form of the model to 4 significant figures is:
+
+
+$$ log_{10}(meansalary) \sim N(-51.22 + 0.0287 \times yearID, 0.1858) $$
+
+- The multiple R-Squared, which is 0.4878, tells us that 48.78% of the variance in log10(meansalary) is accounted for by the model.
+
+I will then evaluate four assumptions of linear models for this data.
+
+```{r}
+linmod %>% 
+  gg_diagnose(max.per.page = 1)
+```
+
+i) The first assumption to evaluate is linearity. This is checked using the residual vs fitted values plot. Linearity is confirmed when there is a horizontal line with no observable trend. The Residual vs Fitted Value plot for this model shows no observable trend, albeit the spread of values at each fitted value point slightly varies. This confirms that linearity is appropriate.
+
+ii) The second assumption to evaluate is normality of residuals. Evidence of normality would be a straight line in a QQ plot. In the QQ plot for this model, the values have a very close to a straight line, thus confirming the assumption of normality.
+
+iii) The third assumption to evaluate is homoscedasticity of residuals. A horizontal line with an even spread on the Scale-Location plot would confirm homoscedasticity. In this model's Scale-Location plot, there is a slight upward then downward trend, showing some evidence of heteroscedasticity. However, the trend line is not too far from the zero line, thus we can conclude that homoscedasticity is most dominant.
+
+iv) The last assumption to evaluate is independence of residuals. The plot to investigate is residuals against predictors. For this model, the plot of residuals vs yearID is showing some slight wavy line trend, but it is close to the zero mark. We can therefore conclude that the residuals are mostly independent, but not fully independent.
+
+
+Next, we will plot confidence and prediction bands for this model.  The points will be coloured according to who won the World Series each year.  
+
+```{r}
+Teamdata %>% 
+  ggplot(mapping = aes(x = yearID, y = log10(meansalary), color = WSWin))+
+  geom_point(size=2)+
+  geom_smooth(method=lm, color='#2C3E50') +
+  labs(
+    title = "Mean Team Salaries Confidence Band",
+    x = "Year",
+    y = "Log base 10 Mean Salary"
+  ) +
+  theme_classic()
+
+pred<-predict(linmod,interval="prediction")
+Teamdata %>% 
+  cbind(pred) %>%           
+  ggplot(mapping = aes(yearID, log10(meansalary), color = WSWin)) +
+  geom_point(size=2)+
+  geom_smooth(method=lm, color='#2C3E50') +
+  geom_line(aes(y=lwr), color=2,lty=2) +
+  geom_line(aes(y=upr), color=2,lty=2) +
+  labs(
+    title = "Mean Team Salaries Prediction Band",
+    x = "Year",
+    y = "Log base 10 Mean Salary"
+  ) +
+  theme_classic()
+```
+
+- It is evident that there is not too much of a variation in the width of the confidence band. It is only slightly wider at the ends, and this indicates that there is a good amount of data collected for each year. It is also evident that most of the teams which won the world series each year have higher mean salaries as compared to the predicted average mean salary. There is only one winning team which had a mean salary below average, and that occurred in 2003.
+
+We will then investigate the points that appear above the top prediction band.  
+ 
+```{r}
+Teamdata %>% 
+  cbind(pred) %>% 
+  mutate(log10salary = log10(meansalary)) %>% 
+  filter(log10salary > upr) %>% 
+  pull(name)
+```
+ 
+- The points that appear above the top prediction band relate to the New York Yankees team.
+
+# 3. Multiple regression for Count Data
+
+In this section, first we will create a histogram of the number of runs scored for players in the Playerdata dataset so each bar is a single value (0,1,2 runs, etc).  Next we will create a histogram of the number of runs for all players who have had a hit. 
+
+```{r}
+Playerdata %>% 
+  ggplot(mapping = aes(x = R)) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    title = "Number of Runs Scored by All Players",
+    x = "Number of Runs"
+  )
+
+Playerdata %>% 
+  filter(H > 0) %>% 
+  ggplot(mapping = aes(x = R)) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    title = "Number of Runs Scored by Players with Hits",
+    x = "Number of Runs"
+  )
+
+  
+```
+
+- Players who have had a hit are more likely to score a run than players who have had 0 hits. One needs a hit to move on to first base, then second base, then third base and finally home for them to score a run. Players who have 0 hits have not even moved to first base, so the runs will automatically be 0, hence they have been removed and the remaining players who have had hits form a decaying exponential plot, with players who have had 0 and 1 runs being the most, and better players having 100+ runs being the least. This confirms that a Poisson distribution will be more suitable for the second plot, since most players are situated around zero, and a decreasing exponential curve is seen with less players having more runs. In addition, number of runs can't be negative, and will always be a positive count variable, hence confirming that a Poisson distribution is suitable. According to the data, the second set should have a Poisson distribution because the shape of the data forms a decaying exponential. 
+
+
+Next, we will create a new dataset, OnBase of all players who have had at least one hit, transform yearID to a factor and construct a Poisson model, glm1, of the number of runs as a function of the number of hits, the year as a factor, position played and player height and age.
+
+```{r}
+Playerdata %>% 
+  filter(H > 0) %>% 
+  mutate(yearID = as.factor(yearID)) -> OnBase
+
+glm1 <- glm(R ~ H + yearID + POS + height + age , data = OnBase,family="poisson")
+summary(glm1)
+
+
+  
+```
+
+
+We will then find the p-value for each of the predictor variables in this model using a Likelihood Ratio Test.  
+
+```{r}
+Anova(glm1)
+```
+
+- A p-value tests the hypothesis whether a variable is statistically significant. A p-value is between 0 and 1. For a variable to be statistically significant, it's p value must be less than or equal to 0.05. The p-value threshold of 0.05 tells us that there is a probability of 0.05 that an observed difference occurred randomly. The p-value for POS is very small at a value of 2.2e-16, meaning there is a probability of 2.2e-16 that variations caused by POS occurred randomly. This shows that POS is statistically significant, since the p-value is less than the threshold of 0.05. However, the p-value for height is 0.1099, and this is larger than the threshold of 0.05. This means that height is not a statistically significant variable.
+
+We will then state the assumptions of Poisson models and check these where possible.
+
+i) The first assumption of a Poisson model is that of dispersion. There should be no under-dispersion and overdispersion. For this to happen, the variance should be equal to mean. This is checked by plotting absolute value of residuals versus predicted means. The trend line should look flat and be around 0.8. In this model, the data suggests overdispersion as the red line is above the 0.8 mark, and is between 1.0 and 1.5. This means that the choice of predictor variables should be improved.
+
+```{r}
+plot(glm1,which=3)
+abline(h=0.8,col=3)
+```
+
+ii) The second assumption to check is linearity. This is evaluated by looking at the Residuals vs Fitted plot and a flat trend line on the zero mark would indicate linearity. The trend line in this model's Residual vs Fitted plot is not entirely flat, as it is first close to below zero, rises slightly above it and then linearly decreases below zero. The model therefore is mostly linear but shows some indication of non-linearity.
+
+```{r}
+plot(glm1,which=1)
+```
+
+iii) The third assumption to check is residual distribution, and for this the QQ plot is investigated. The QQ plot for this model is fairly straight, thus indicating the residuals are normally distributed.
+
+```{r}
+plot(glm1,which=2)
+```
+
+iv) The last assumption to check is independence. The residuals are investigated as a function of order of data points and evidence of snaking is looked for. There is no natural order in this data set hence can't be investigated.
+
+
+
+Now we will create a new model that includes teamID as a random effect. 
+
+```{r}
+glm2 <- glmer(R ~ H + yearID + POS + height + age + (1 | teamID) , data = OnBase, family="poisson", nAGQ=0)
+glm2
+```
+
+- The teamsID random effect has a standard deviation of 0.0965, which tells us that a good team will score $exp(2 \times 0.0965) = 1.213$ times more runs than an average team. So, if an average team had a total of 4 runs, being in a good team would indicate that about 5 runs would be scored. This is a relatively small effect, since final baseball scores are not that high. The statistical significance of this effect can be obtained by comparing the AIC values of the model that doesn't have the random effect (glm1) to the model with the random effect (glm2). The first model, glm1, has an AIC of 12616 and the second model has an AIC of 12286.5. Since the latter has a lower value, it means that the model with the teamsID random effect is more statistically significant since it is a more explanatory model.
+
+```{r}
+summary(glm1)
+summary(glm2)
+```
+
+
+
+We will then check What is the mean number of runs we expect 30-year old, 72 inch tall outfielders playing for the Baltimore Orioles in 2015 with 20 hits to have scored.
+
+```{r}
+predict(glm2,newdata=data.frame(age = 30, height = 72 , teamID = "BAL", yearID = "2015", H = 20, POS = "OF"))
+ 
+
+  
+```
+
+- The mean number of runs predicted is 2.864
+
+# 4.  Lasso Regression for Logistic Regression
+
+In this section we will create a new dataset DivWinners by removing all of the variables that are team or park identifiers in the dataset, as well as 'lgID', 'Rank','franchID','divID', 'WCWin','LgWin', and 'WSwin'.
+We will then split the resulting into a training and a testing set so that the variable 'DivWin' is balanced between the two datasets. The seed is 123.
+
+```{r}
+Teamdata %>% 
+  select(! c("lgID", "Rank", "franchID", "divID", "WCWin", "LgWin", "WSWin", "teamID", "name", "park", "teamIDBR", "teamIDlahman45", "teamIDretro")) -> DivWinners
+
+set.seed(123)
+training.samples <- DivWinners$DivWin %>%
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- DivWinners[training.samples, ]
+test.data <- DivWinners[-training.samples, ]
+```
+
+
+
+Next the training data will be used to fit a logistic regression model using the 'glmnet' command. Residual deviance against number of predictors will then be plotted.  
+
+```{r}
+divwin <- as.vector(train.data$DivWin)
+Divpredict<-model.matrix(~.-1,train.data[,-c(6)])
+divwinfit<-glmnet(Divpredict, divwin, family = "binomial")
+plot(divwinfit,xvar="dev")
+
+```
+
+
+We will then investigate How many nonzero model coefficients are needed to explain 50% and 60% of the deviance.  
+
+```{r}
+divwinfit
+```
+
+- To explain 50% of the deviance, only 2 non-zero model coefficients are needed. To explain 60% of the deviance, 26 non-zero model coefficients are needed. The coefficients needed to explain 50% of the data are W and L. The coefficients necessary to explain 60% of the data are yearID, Ghome, W, L, AB, H, X2B, X3B, HR, BB, SO, SB, CS, HBP, SF, RA, CG, SV, HA, HRA, BBA, SOA, DP, FP, attendance, PPF and rostersize.
+
+```{r}
+div50<-coef(divwinfit, s=0.038030)
+div50@Dimnames[[1]][1+div50@i]
+
+div60<-coef(divwinfit, s=0.001937)
+div60@Dimnames[[1]][1+div60@i]
+```
+
+
+Cross-validation will then be used to choose a moderately conservative model.
+
+```{r}
+set.seed(123)
+divcv<-cv.glmnet(Divpredict,divwin, family = "binomial")
+plot(divcv)
+```
+
+```{r}
+div_sd<-coef(divwinfit,s=divcv$lambda.1se)
+div_sd@Dimnames[[1]][1+div_sd@i] 
+```
+
+- The variables that will be chosen are W (number of wins), L (number of losses) and attendance.
+
+The model will then be fit on the training data, then predict on the testing data.
+
+```{r}
+divmodel <- glm(as.factor(DivWin) ~ W + L + attendance, data = train.data, family = "binomial")
+
+predtrain<-predict(divmodel,type="response")
+predtest<-predict(divmodel,newdata=test.data,type="response")
+
+roctrain<-roc(response=train.data$DivWin,predictor=predtrain,plot=TRUE,auc=TRUE)
+roctest<-roc(response=test.data$DivWin,predictor=predtest,plot=TRUE,auc=TRUE,add=TRUE,col=2)
+legend(0,0.8,legend=c("train","test"),fill=1:2)
+```
+
+- There is not too much space between the ROC curve of the training data and the testing data, indicating there's not much overfitting. This is also a good model because an estimated good compromise of sensitivity and specificity is about 0.9 and 0.8 respectively, and both ROC curves reflect this.
+
+Youden's index will be found for the training data and we will calculate confusion matrices at this cutoff for both training and testing data. 
+```{r}
+youdendiv<-coords(roctrain,"b",best.method="youden",transpose=TRUE)
+youdendiv
+
+youdendiv[2]+youdendiv[3]
+
+#youdendivtest<-coords(roctest,x=0.1836071,transpose=TRUE)
+#youdendivtest
+#youdendivtest[2]+youdendivtest[3]
+
+train.data$preddiv<-ifelse(predict(divmodel,newdata=train.data, type="response")>= 0.1836071,"Y","N")
+table(train.data$preddiv,as.factor(train.data$DivWin))
+
+test.data$preddiv<-ifelse(predict(divmodel,newdata=test.data, type="response")>= 0.1836071,"Y","N")
+table(test.data$preddiv,as.factor(test.data$DivWin))
+```
+
+- Youden's index for the training data is 0.1836. For the prediction on the test data, the model quality can be summarised using false negative and false positive rates. A false positive rate is given as False positive rate = FP/(TN+FP) where FP means false positive and TN means true negative. The false positive rate would be therefore 1/(87+1) = 0.01136.
+A false negative rate is given as False negative rate = FN/(FN+TP) where FN means false negative and TP means true positive. The false negative rate would be therefore 17/(17+25) = 0.4048. Smaller false positive and false negative rates imply that the model is of good quality. In this case, the small false positive rate means that the model is good at predicting teams which lose, but the higher false negative rate means that the model is not good at predicting teams which will win. The model needs to be improved to reduce the false positive rate, as knowing which teams will win the division is more beneficial.
+
+Next we will calculate the sensitivity+specificity on the testing data as a function of divID and plot as a barchart. 
+
+```{r}
+Teamdata %>% 
+  select(! c("lgID", "Rank", "franchID", "WCWin", "LgWin", "WSWin", "teamID", "name", "park", "teamIDBR", "teamIDlahman45", "teamIDretro")) -> DivWinners2
+
+set.seed(123)
+
+training.samples2 <- DivWinners2$DivWin %>%
+  createDataPartition(p = 0.8, list = FALSE)
+train.data2  <- DivWinners2[training.samples2, ]
+test.data2 <- DivWinners2[-training.samples2, ]
+
+test.data2 %>% 
+  filter(divID == "E") -> test.data2E
+
+test.data2 %>% 
+  filter(divID == "C") -> test.data2C
+
+test.data2 %>% 
+  filter(divID == "W") -> test.data2W
+
+
+
+predtest2E<-predict(divmodel,newdata=test.data2E,type="response")
+roctest2E<-roc(response=test.data2E$DivWin,predictor=predtest2E,plot=FALSE)
+
+predtest2C<-predict(divmodel,newdata=test.data2C,type="response")
+roctest2C<-roc(response=test.data2C$DivWin,predictor=predtest2C,plot=FALSE)
+
+predtest2W<-predict(divmodel,newdata=test.data2W,type="response")
+roctest2W<-roc(response=test.data2W$DivWin,predictor=predtest2W,plot=FALSE)
+
+youdendivtest2E<-coords(roctest2E,x=0.1836071,transpose=TRUE)
+youdendivtest2C<-coords(roctest2C,x=0.1836071,transpose=TRUE)
+youdendivtest2W<-coords(roctest2W,x=0.1836071,transpose=TRUE)
+
+youdendivtest2E[2]+youdendivtest2E[3] -> sumE
+youdendivtest2C[2]+youdendivtest2C[3] -> sumC
+youdendivtest2W[2]+youdendivtest2W[3] -> sumW
+
+ggplot(mapping = aes(x = c("C", "E", "W"), y = c(sumC, sumE, sumW))) +
+  geom_col() +
+  labs(
+    title = "Sum of Specifity and Sensitivity According to divID",
+    x = "divID",
+    y = "Specificity + Sensitivity"
+  ) +
+  theme_classic()
+
+
+
+
+
+
+```
+
+- The prediction is almost equally good for all divisions, with division C, E and W having sensitivity and specificity sums of 1.79, 1.76 and 1.87. Division W had the best prediction since it had the highest sum of 1.87.
